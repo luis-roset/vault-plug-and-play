@@ -1,38 +1,235 @@
-# HashiCorp Vault 2.0.3 — Native AI Agent Support Guide
+# Vault Enterprise — Plug and Play
 
-A step-by-step guide to configure **Native AI Agent Support** in Vault Enterprise 2.0.3 using the setup in this repository: a 3-node Raft cluster with TLS (`server1`, `server2`, `server3`) plus a standalone MCP server instance.
+A zero-friction deployment kit for **Vault Enterprise** using Podman. Run one script and get a fully initialized, TLS-enabled Vault environment in minutes — single node or two-node with Performance Replication.
 
 ---
 
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Architecture](#architecture)
+2. [Repository Layout](#repository-layout)
 3. [Prerequisites](#prerequisites)
-4. [How the Setup Works](#how-the-setup-works)
-5. [Step 1 — Start the Environment](#step-1--start-the-environment)
-6. [Step 2 — Initialize and Unseal the Cluster](#step-2--initialize-and-unseal-the-cluster)
-7. [Step 3 — Activate the OAuth Resource Server Feature](#step-3--activate-the-oauth-resource-server-feature)
-8. [Step 4 — Create an OAuth Resource Server Profile](#step-4--create-an-oauth-resource-server-profile)
-9. [Step 5 — Configure Agent Registry Policies](#step-5--configure-agent-registry-policies)
-10. [Step 6 — Register an AI Agent](#step-6--register-an-ai-agent)
-11. [Step 7 — Test Agent Authentication](#step-7--test-agent-authentication)
-12. [Step 8 — Rich Authorization Requests (RAR)](#step-8--rich-authorization-requests-rar)
-13. [Cluster Ports Reference](#cluster-ports-reference)
-14. [Troubleshooting](#troubleshooting)
+4. [Quick Start](#quick-start)
+5. [Topology Options](#topology-options)
+6. [How It Works](#how-it-works)
+7. [Ports Reference](#ports-reference)
+8. [Teardown](#teardown)
+9. [Use Cases](#use-cases)
+   - [AI Integration — Native AI Agent Support](#use-case-1--ai-integration--native-ai-agent-support)
+10. [Troubleshooting](#troubleshooting)
+11. [Resources](#resources)
 
 ---
 
 ## Overview
 
-Vault Enterprise 2.0.3 introduces **Native AI Agent Support** through two integrated components:
+`vault-plug-and-play` automates the full Vault Enterprise bootstrap lifecycle:
 
-| Component | Purpose |
+| Phase | What happens |
 |---|---|
-| **Agent Registry** | Enroll, govern, and audit agentic identities within Vault |
-| **OAuth Resource Server** | Allow AI agents to authenticate using OAuth 2.0 JWT tokens — no separate Vault login required |
+| **TLS** | Self-signed CA and per-node certificates are generated automatically |
+| **Containers** | Vault Enterprise containers are pulled and started via Podman |
+| **Init & Unseal** | Each node is initialized (1 key share / threshold 1) and unsealed |
+| **Replication** | Performance Replication is activated between node1 and node2 (2-node only) |
 
-The flow works as follows:
+Everything is local — no cloud account, no Kubernetes, no external dependencies beyond Podman and a valid Vault Enterprise license.
+
+---
+
+## Repository Layout
+
+```
+vault-plug-and-play/
+├── deploy.sh               # Interactive deployment entry point
+├── teardown.sh             # Full cleanup (containers, network, data, TLS)
+├── config/
+│   ├── vault-single.hcl   # Raft config for single-node mode
+│   ├── vault-node1.hcl    # Raft config for node1 (primary, 2-node mode)
+│   └── vault-node2.hcl    # Raft config for node2 (secondary, 2-node mode)
+├── scripts/
+│   ├── gen-certs.sh        # CA + per-node TLS certificate generation
+│   ├── init-vault.sh       # Vault init + unseal automation
+│   └── setup-replication.sh# Performance Replication setup (2-node only)
+├── tls/                    # Generated at deploy time — do not commit
+└── data/                   # Raft data + init.json credentials — do not commit
+```
+
+---
+
+## Prerequisites
+
+| Requirement | Notes |
+|---|---|
+| **Podman** | v4+ recommended; `podman` must be in `PATH` |
+| **curl**, **jq**, **openssl** | Standard utilities used by the scripts |
+| **vault CLI** | For manual operations after deployment |
+| **Vault Enterprise license** | Set `VAULT_LICENSE` in `.env` or provide interactively |
+| **Vault Enterprise 2.0.3+** | Required for AI Agent features (Use Case 1) |
+
+### License setup (recommended)
+
+Create a `.env` file in the repo root before running `deploy.sh`:
+
+```bash
+VAULT_LICENSE="<your-license-string>"
+```
+
+The script will also accept a file path or an inline paste if `.env` is absent.
+
+---
+
+## Quick Start
+
+```bash
+# Clone or download the repo, then:
+./deploy.sh
+```
+
+`deploy.sh` is interactive — it will prompt for:
+
+1. **Vault Enterprise version** (e.g. `2.0.3`, `latest`)
+2. **Number of nodes** (`1` for single-node, `2` for Performance Replication)
+3. **License** (if not already in `.env`)
+
+After the script completes, Vault is initialized, unsealed, and ready.
+
+```
+  Node 1 API:  https://localhost:8200
+  Node 1 UI:   https://localhost:8200/ui
+  CA cert:     tls/ca.crt          ← trust this in your browser/CLI
+  Credentials: data/vault-node1/init.json
+```
+
+Point the Vault CLI at node1:
+
+```bash
+export VAULT_ADDR="https://localhost:8200"
+export VAULT_CACERT="tls/ca.crt"
+export VAULT_TOKEN="$(jq -r '.root_token' data/vault-node1/init.json)"
+
+vault status
+```
+
+---
+
+## Topology Options
+
+### Single node (`NODE_COUNT=1`)
+
+One container (`vault-node1`) running a Raft single-node cluster. Good for development, demos, and feature testing.
+
+```
+vault-node1  →  localhost:8200  (API / UI)
+             →  localhost:8201  (Raft cluster port)
+```
+
+### Two nodes (`NODE_COUNT=2`)
+
+Two containers connected via Vault **Performance Replication**. Policies, auth methods, and secrets engines created on node1 replicate automatically to node2.
+
+```
+vault-node1 (primary)    →  localhost:8200 / 8201
+vault-node2 (secondary)  →  localhost:8202 / 8203
+```
+
+---
+
+## How It Works
+
+`deploy.sh` orchestrates the following steps in order:
+
+### Step 1 — TLS generation (`scripts/gen-certs.sh`)
+
+A local CA (`tls/ca.crt` / `tls/ca.key`) is created once and reused on subsequent runs. Per-node certificates are signed by this CA with SANs covering both the container hostname and `localhost`, so the same cert works for internal Podman DNS and host-side CLI access.
+
+```
+tls/
+├── ca.crt                 shared CA
+├── vault-node1/
+│   ├── ca.crt             CA copy (mounted into container at /vault/tls/)
+│   ├── vault.crt          node server cert
+│   └── vault.key          node private key
+└── vault-node2/           (2-node only)
+```
+
+### Step 2 — Container deployment
+
+Each node is started with `podman run`:
+
+```bash
+podman run -d \
+  --name vault-node1 \
+  --network vault-network \
+  --hostname vault-node1 \
+  --cap-add IPC_LOCK \
+  -e VAULT_LICENSE="..." \
+  -v config/vault-single.hcl:/vault/config/vault.hcl:ro \
+  -v data/vault-node1:/vault/data \
+  -v tls/vault-node1:/vault/tls:ro \
+  -p 8200:8200 -p 8201:8201 \
+  hashicorp/vault-enterprise:<version> \
+  vault server -config=/vault/config/vault.hcl
+```
+
+All nodes share the `vault-network` Podman network. Container hostnames (`vault-node1`, `vault-node2`) are used for Raft peer discovery and replication addresses.
+
+### Step 3 — Init and unseal (`scripts/init-vault.sh`)
+
+The script polls `GET /v1/sys/health` until Vault responds, then:
+
+1. Calls `PUT /v1/sys/init` with 1 key share / threshold 1
+2. Saves the response (unseal key + root token) to `data/<node>/init.json`
+3. Calls `PUT /v1/sys/unseal`
+
+On re-runs, if a node is already initialized but sealed, it reads the existing `init.json` and unseals automatically.
+
+> **Production note:** Use `secret_shares=5, secret_threshold=3` and distribute keys via PGP. The 1/1 split is for local use only.
+
+### Step 4 — Performance Replication (`scripts/setup-replication.sh`, 2-node only)
+
+1. Enables replication on node1 as primary
+2. Generates a wrapped secondary activation token
+3. Activates replication on node2 using that token
+4. Verifies the replication state on both nodes
+
+---
+
+## Ports Reference
+
+| Container | Host API port | Host cluster port | TLS |
+|---|---|---|---|
+| `vault-node1` | `8200` | `8201` | Yes |
+| `vault-node2` | `8202` | `8203` | Yes (2-node only) |
+
+```bash
+# Target node1
+export VAULT_ADDR="https://localhost:8200"
+export VAULT_CACERT="tls/ca.crt"
+
+# Target node2 (2-node setup)
+export VAULT_ADDR="https://localhost:8202"
+export VAULT_CACERT="tls/ca.crt"
+```
+
+---
+
+## Teardown
+
+```bash
+./teardown.sh
+```
+
+This removes all containers, the `vault-network` Podman network, and the `data/` directory. TLS certificates are **not** removed — delete `tls/` manually if you want to regenerate them on the next run.
+
+---
+
+## Use Cases
+
+### Use Case 1 — AI Integration: Native AI Agent Support
+
+Vault Enterprise 2.0.3 introduces **Native AI Agent Support** — a built-in mechanism to enroll, govern, and authenticate AI agents without requiring them to perform a traditional Vault login. This use case walks through configuring it on top of this plug-and-play environment.
+
+#### How it works
 
 ```
 AI Agent (JWT token)
@@ -50,161 +247,32 @@ Vault checks Agent Registry for a matching record
 Authorization evaluated against baseline policies + delegation ceiling
 ```
 
----
+Two components power this flow:
 
-## Architecture
+| Component | Purpose |
+|---|---|
+| **OAuth Resource Server** | Accepts JWT tokens from AI agent identity providers — no `vault login` needed |
+| **Agent Registry** | Stores and governs registered agentic identities |
 
-This repository runs the following containers (see `tech-link/docker-compose.yaml`):
+All steps below target **node1** (`https://localhost:8200`). Set your environment first:
 
-| Container | Role | Port (host) | TLS |
-|---|---|---|---|
-| `server1` | Raft leader (primary) | `8400` | Yes |
-| `server2` | Raft peer | `8200` | Yes |
-| `server3` | Raft peer | `8500` | Yes |
-| `mcp-server` | Standalone MCP Vault | `8800` | No |
-| `linux` | Client / testing node | `8700` | — |
-| `ngrok` | External tunnel → server3 | — | — |
-
-The Vault Raft cluster uses mutual TLS:
-
-- **Cluster addr**: `https://server1:8201`
-- **API addr**: `https://server1:8200`
-- **TLS certs**: mounted at `/tls/` in each server container
-
-The `mcp-server` is a separate standalone Vault instance (no TLS) used for MCP tool access.
-
----
-
-## Prerequisites
-
-- Docker and Docker Compose installed
-- A valid **Vault Enterprise license** (`vault.hclic`) placed at `tech-link/configs/vault.hclic`
-- TLS certificates generated and placed under `tech-link/tls/` (one set per server)
-- `vault` CLI installed locally
-- Vault Enterprise **2.0.3** or later
-
----
-
-## How the Setup Works
-
-**server1** (`tech-link/configs/server1.hcl`) is the primary node:
-
-```hcl
-ui            = true
-cluster_addr  = "https://server1:8201"
-api_addr      = "https://server1:8200"
-disable_mlock = true
-
-storage "raft" {
-  path    = "/raft"
-  node_id = "server1"
-}
-
-listener "tcp" {
-  address            = "0.0.0.0:8200"
-  tls_disable        = 0
-  tls_cert_file      = "/tls/cert.pem"
-  tls_key_file       = "/tls/key.pem"
-  tls_client_ca_file = "/tls/ca.pem"
-}
-
-license_path = "/etc/vault.d/vault.hclic"
-```
-
-The **Vault Agent** (`tech-link/configs/agent/agent.hcl`) uses AppRole auth and points to `server1`:
-
-```hcl
-auto_auth {
-  method "approle" {
-    config = {
-      role_id_file_path                = "/etc/vault.d/role"
-      secret_id_file_path              = "/etc/vault.d/secret"
-      remove_secret_id_file_after_reading = false
-    }
-  }
-  sink "file" {
-    config = { path = "/etc/vault.d/.vault-token" }
-  }
-}
-
-vault {
-  address = "https://server1:8200"
-}
+```bash
+export VAULT_ADDR="https://localhost:8200"
+export VAULT_CACERT="tls/ca.crt"
+export VAULT_TOKEN="$(jq -r '.root_token' data/vault-node1/init.json)"
 ```
 
 ---
 
-## Step 1 — Start the Environment
+#### Step 1 — Activate the OAuth Resource Server feature
+
+This is a **one-time, irreversible** activation per namespace.
 
 ```bash
-cd tech-link
-docker compose up -d
-```
-
-Verify all containers are running:
-
-```bash
-docker compose ps
-```
-
----
-
-## Step 2 — Initialize and Unseal the Cluster
-
-> Skip this if you already have an initialized cluster. Your init output is stored in `configs/init-1.txt/init.txt`.
-
-**Initialize server1** (single key for dev simplicity, use 5/3 for production):
-
-```bash
-export VAULT_ADDR="https://127.0.0.1:8400"
-export VAULT_CACERT="tech-link/tls/vault-ca.pem"
-
-vault operator init -key-shares=1 -key-threshold=1
-```
-
-**Unseal server1**:
-
-```bash
-vault operator unseal <Unseal-Key-1>
-```
-
-**Join server2 and server3 to the Raft cluster**:
-
-```bash
-# From inside the server2 container
-docker exec -it server2 vault operator raft join \
-  -leader-ca-cert=@/tls/ca.pem \
-  https://server1:8200
-
-# From inside the server3 container
-docker exec -it server3 vault operator raft join \
-  -leader-ca-cert=@/tls/ca.pem \
-  https://server1:8200
-```
-
-**Unseal server2 and server3** with the same unseal key.
-
-**Login with root token**:
-
-```bash
-vault login <Initial-Root-Token>
-```
-
----
-
-## Step 3 — Activate the OAuth Resource Server Feature
-
-This is a **one-time, irreversible** activation per namespace. Do this on `server1`.
-
-```bash
-export VAULT_ADDR="https://127.0.0.1:8400"
-export VAULT_CACERT="tech-link/tls/vault-ca.pem"
-export VAULT_TOKEN="<root-or-admin-token>"
-
 vault write -f sys/activation-flags/oauth-resource-server/activate
 ```
 
-Verify the activation:
+Verify:
 
 ```bash
 vault read sys/activation-flags/oauth-resource-server
@@ -217,48 +285,43 @@ Key        Value
 activated  true
 ```
 
-> **Note:** This action cannot be undone. Once activated, the namespace is permanently enabled for OAuth resource server functionality.
+> **Note:** Once activated, the namespace is permanently enabled. This cannot be undone.
 
 ---
 
-## Step 4 — Create an OAuth Resource Server Profile
+#### Step 2 — Create an OAuth Resource Server Profile
 
-An OAuth profile defines the trust relationship between Vault and your AI agent's identity provider (e.g., an external OAuth 2.0 server, your AI platform, or a custom issuer).
+A profile defines the trust relationship between Vault and your AI agent's identity provider.
 
-### Option A — JWKS (Recommended for production)
-
-The issuer exposes a public JWKS endpoint that Vault fetches automatically.
+**Option A — JWKS (recommended for production)**
 
 ```bash
 vault write sys/config/oauth-resource-server/profiles/my-ai-platform \
   issuer="https://my-ai-platform.example.com" \
   jwks_url="https://my-ai-platform.example.com/.well-known/jwks.json" \
-  allowed_audiences="https://server1:8200" \
+  allowed_audiences="https://vault-node1:8200" \
   user_claim="sub"
 ```
 
-### Option B — Static PEM keys
-
-Use this when the issuer does not expose a JWKS endpoint (e.g., a local development environment).
+**Option B — Static PEM key (for local/dev environments)**
 
 ```bash
 vault write sys/config/oauth-resource-server/profiles/my-ai-platform \
   issuer="https://my-ai-platform.example.com" \
   jwt_validation_pubkeys=@/path/to/public-key.pem \
-  allowed_audiences="https://server1:8200" \
+  allowed_audiences="https://vault-node1:8200" \
   user_claim="sub"
 ```
 
-### Profile parameters reference
+**Profile parameters**
 
 | Parameter | Description |
 |---|---|
-| `issuer` | Unique URI identifying the OAuth 2.0 issuer (must be unique per namespace) |
+| `issuer` | Unique URI identifying the OAuth 2.0 issuer |
 | `jwks_url` | URL of the JWKS endpoint (JWKS mode) |
 | `jwt_validation_pubkeys` | PEM-encoded public key(s) (static mode) |
-| `allowed_audiences` | Accepted JWT `aud` claim values — typically your Vault API address |
-| `user_claim` | JWT claim used to identify the agent's entity (commonly `sub`) |
-| `allowed_algorithms` | Defaults to all supported asymmetric algorithms (see below) |
+| `allowed_audiences` | Accepted JWT `aud` claim — typically your Vault API address |
+| `user_claim` | JWT claim used to identify the agent's entity (usually `sub`) |
 
 **Supported signing algorithms** (asymmetric only — HMAC is not supported):
 
@@ -270,21 +333,18 @@ vault write sys/config/oauth-resource-server/profiles/my-ai-platform \
 
 ---
 
-## Step 5 — Configure Agent Registry Policies
+#### Step 3 — Configure Agent Policies
 
-AI agents operate under **two policy layers**:
+AI agents operate under two policy layers:
 
-1. **Baseline policy** — what the agent's Vault identity is normally allowed to do
-2. **Authorization ceiling** — the maximum permissions that can be delegated to the agent (ceiling ⊆ baseline)
-
-### Create a baseline policy
+1. **Baseline policy** — what the agent's Vault identity is allowed to do
+2. **Ceiling policy** — the maximum permissions that can ever be delegated to the agent (ceiling ⊆ baseline)
 
 ```hcl
 # agent-baseline.hcl
 path "secret/data/ai-agents/*" {
   capabilities = ["read"]
 }
-
 path "database/creds/ai-role" {
   capabilities = ["read"]
 }
@@ -293,10 +353,6 @@ path "database/creds/ai-role" {
 ```bash
 vault policy write agent-baseline agent-baseline.hcl
 ```
-
-### Create a ceiling policy
-
-The ceiling restricts what the agent can further delegate. The `default-ceiling` policy is automatically included in all ceilings — it prevents agents from modifying their own governance constraints.
 
 ```hcl
 # agent-ceiling.hcl
@@ -309,7 +365,7 @@ path "secret/data/ai-agents/readonly/*" {
 vault policy write agent-ceiling agent-ceiling.hcl
 ```
 
-### Create an Identity Entity for the agent
+Create a Vault Identity Entity for the agent:
 
 ```bash
 vault write identity/entity \
@@ -321,9 +377,7 @@ Note the `id` returned — you will need it in the next step.
 
 ---
 
-## Step 6 — Register an AI Agent
-
-With the Identity Entity created, register it in the Agent Registry:
+#### Step 4 — Register the AI Agent
 
 ```bash
 vault write agent-registry/agents \
@@ -333,7 +387,7 @@ vault write agent-registry/agents \
   ceiling_policies="agent-ceiling"
 ```
 
-### Verify the registration
+Verify the registration:
 
 ```bash
 vault list agent-registry/agents
@@ -348,29 +402,18 @@ name                 my-ai-agent
 entity_id            <entity-id>
 description          Primary AI agent for data retrieval tasks
 ceiling_policies     [agent-ceiling default-ceiling]
-created_time         2026-07-14T...
 ```
 
 ---
 
-## Step 7 — Test Agent Authentication
+#### Step 5 — Test Agent Authentication
 
-When an AI agent makes a request, it presents a JWT token (obtained from its identity provider). Vault validates it against the configured OAuth profile.
-
-### Simulate a token exchange
-
-```bash
-# The agent sends its JWT to Vault
-vault write auth/token/lookup-self \
-  -header "Authorization: Bearer <agent-jwt-token>"
-```
-
-Or using the OAuth token endpoint directly:
+When an AI agent makes a request, it presents its JWT to Vault's OAuth token endpoint:
 
 ```bash
 curl --request POST \
-  --cacert tech-link/tls/vault-ca.pem \
-  --url "https://127.0.0.1:8400/v1/sys/config/oauth-resource-server/token" \
+  --cacert tls/ca.crt \
+  --url "https://localhost:8200/v1/sys/config/oauth-resource-server/token" \
   --header "Content-Type: application/json" \
   --data '{
     "jwt": "<agent-jwt-token>",
@@ -378,24 +421,13 @@ curl --request POST \
   }'
 ```
 
-A successful response returns a **Vault client token** scoped to the agent's baseline policy intersected with its ceiling.
-
-### Using the Vault Agent (AppRole) alongside AI Agent support
-
-Your existing `agent.hcl` uses AppRole for the Vault Agent process itself. For AI agents using OAuth JWTs, the flow is separate — the agent does **not** need to run `vault login`. It presents its JWT directly to Vault's OAuth endpoint and receives a scoped token.
-
-```
-Vault Agent (AppRole) ──▶ manages template rendering, token renewal
-AI Agent (OAuth JWT)  ──▶ authenticates directly via OAuth Resource Server
-```
+A successful response returns a Vault client token scoped to the agent's baseline policy intersected with its ceiling. The agent uses this token for subsequent Vault API calls — no prior `vault login` is needed.
 
 ---
 
-## Step 8 — Rich Authorization Requests (RAR)
+#### Step 6 — Rich Authorization Requests (RAR)
 
-RAR allows an AI agent's JWT to encode **fine-grained path and capability constraints** inline. Vault enforces these on top of the agent's existing policies.
-
-### RAR token claim format
+RAR allows a JWT to encode fine-grained path and capability constraints inline. Vault enforces these on top of the agent's existing policies.
 
 Include an `authorization_details` claim in the JWT issued by your identity provider:
 
@@ -403,7 +435,7 @@ Include an `authorization_details` claim in the JWT issued by your identity prov
 {
   "sub": "my-ai-agent",
   "iss": "https://my-ai-platform.example.com",
-  "aud": "https://server1:8200",
+  "aud": "https://vault-node1:8200",
   "authorization_details": [
     {
       "type": "vault:path_access",
@@ -417,52 +449,29 @@ Include an `authorization_details` claim in the JWT issued by your identity prov
 }
 ```
 
-### RAR configuration options
-
-RAR is **enabled by default**. You can control it at the profile level:
+Control RAR enforcement at the profile or agent level:
 
 ```bash
-# Make RAR optional (agent can omit it)
-vault write sys/config/oauth-resource-server/profiles/my-ai-platform \
-  rar_required=false
-
 # Require RAR for all tokens using this profile
 vault write sys/config/oauth-resource-server/profiles/my-ai-platform \
   rar_required=true
-```
 
-Or override at the individual agent level:
-
-```bash
+# Override at agent level
 vault write agent-registry/agents/my-ai-agent \
   rar_required=false
 ```
 
 ---
 
-## Cluster Ports Reference
+## Troubleshooting
 
-| Service | Host Port | Internal Port | Notes |
-|---|---|---|---|
-| server1 (Raft leader) | `8400` | `8200` | TLS enabled — primary target for AI agent config |
-| server2 | `8200` | `8200` | TLS enabled |
-| server3 | `8500` | `8200` | TLS enabled — exposed via ngrok |
-| mcp-server | `8800` | `8200` | No TLS — MCP tool access only |
-
-Set your environment variables accordingly:
+### Container fails to start
 
 ```bash
-# Targeting server1 (primary/leader)
-export VAULT_ADDR="https://127.0.0.1:8400"
-export VAULT_CACERT="tech-link/tls/vault-ca.pem"
-
-# Targeting mcp-server
-export VAULT_ADDR="http://127.0.0.1:8800"
+podman logs vault-node1
 ```
 
----
-
-## Troubleshooting
+Common causes: port already in use, license not loaded, data directory permissions.
 
 ### "Feature not activated" error
 
@@ -476,7 +485,7 @@ Run: `vault write -f sys/activation-flags/oauth-resource-server/activate`
 
 - Verify the `issuer` in the profile exactly matches the `iss` claim in the JWT
 - Confirm the JWKS endpoint is reachable from inside the Vault container
-- Ensure the algorithm used to sign the JWT is in the supported list (no HMAC)
+- Ensure the JWT signing algorithm is in the supported list (no HMAC)
 
 ### Agent not found in registry
 
@@ -487,19 +496,33 @@ Error: no agent registry record found for entity
 - Confirm the `entity_id` in `agent-registry/agents/<name>` matches the entity resolved from the JWT `user_claim`
 - Run `vault read identity/entity/name/<entity-name>` to verify
 
-### TLS handshake errors (server1/server2/server3)
+### TLS errors from CLI
 
-- The CA cert is at `tech-link/tls/vault-ca.pem` — always pass it via `VAULT_CACERT` or `--cacert`
-- Inside containers, it is mounted at `/tls/ca.pem`
+Always pass the CA cert:
 
-### Ceiling policy more permissive than baseline
+```bash
+export VAULT_CACERT="tls/ca.crt"
+```
 
-The ceiling cannot grant more than the baseline allows. If an agent receives fewer permissions than expected, check both:
+Or per command: `vault status --tls-skip-verify` (dev only — do not use in production).
+
+### Ceiling policy error
+
+The ceiling cannot grant more than the baseline allows. Check both:
 
 ```bash
 vault read agent-registry/agents/my-ai-agent   # ceiling_policies
 vault read identity/entity/name/my-ai-agent     # policies (baseline)
 ```
+
+### Replication not syncing (2-node)
+
+```bash
+vault read sys/replication/performance/status
+podman logs vault-node2
+```
+
+The secondary may briefly restart during activation — wait 15–20 seconds after `deploy.sh` completes.
 
 ---
 
@@ -508,4 +531,5 @@ vault read identity/entity/name/my-ai-agent     # policies (baseline)
 - [Vault Native AI Agent Support — Official Docs](https://developer.hashicorp.com/vault/docs/concepts/native-ai-agent-support)
 - [Agent Registry API](https://developer.hashicorp.com/vault/api-docs/agent-registry)
 - [OAuth Resource Server API](https://developer.hashicorp.com/vault/api-docs/system/config-oauth-resource-server)
+- [Vault Enterprise Performance Replication](https://developer.hashicorp.com/vault/docs/enterprise/replication)
 - [Vault Enterprise Licensing](https://developer.hashicorp.com/vault/docs/enterprise/license)

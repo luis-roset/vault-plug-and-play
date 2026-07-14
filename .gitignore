@@ -1,0 +1,13 @@
+# =============================================================================
+# Vault Enterprise — Plug and Play
+# =============================================================================
+
+# Environment — contains license and other secrets
+.env
+
+# Generated at deploy time — never commit credentials or private keys
+data/
+tls/
+
+# macOS
+.DS_Store
