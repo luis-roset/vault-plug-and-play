@@ -1,0 +1,232 @@
+<form version="1.1">
+  <label>Vault Usage Metrics from Audit Logs</label>
+  <fieldset submitButton="false">
+    <input type="time" token="timerange" searchWhenChanged="true">
+      <label>Time span</label>
+      <default>
+        <earliest>-7d@h</earliest>
+        <latest>now</latest>
+      </default>
+    </input>
+    <input type="dropdown" token="cluster" searchWhenChanged="true">
+      <label>Cluster</label>
+      <default>*</default>
+      <fieldForLabel>cluster</fieldForLabel>
+      <fieldForValue>value</fieldForValue>
+      <search>
+        <query>| mcatalog values(cluster) as value WHERE `vault_telemetry` by cluster</query>
+        <earliest>-30d@d</earliest>
+        <latest>now</latest>
+      </search>
+      <choice value="*">all</choice>
+    </input>
+    <input type="dropdown" token="namespace_id">
+      <label>Namespace</label>
+      <choice value="*">All</choice>
+      <choice value="root">root</choice>
+      <default>*</default>
+      <fieldForLabel>path</fieldForLabel>
+      <fieldForValue>id</fieldForValue>
+      <search>
+        <query>`vault_audit_log` 
+| stats latest(request.namespace.path) AS path by request.namespace.id
+| table path, request.namespace.id
+| rename request.namespace.id AS id
+| where id != "root"</query>
+        <earliest>-30d@d</earliest>
+        <latest>now</latest>
+      </search>
+    </input>
+  </fieldset>
+  <row>
+    <panel>
+      <html>
+      <style>
+        .dashboard-row .dashboard-panel .panel-body.html {
+          background: #f2f4f5;
+          padding-top: 20px;
+          padding-bottom: 0;
+        }
+      </style>
+      <h2>Requests</h2>
+    </html>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Requests by Path</title>
+      <chart>
+        <search>
+          <query>`vault_audit_log` type="request" cluster=$cluster$ request.namespace.id=$namespace_id$ | stats count by request.path | sort - count | head 10</query>
+          <earliest>$timerange.earliest$</earliest>
+          <latest>$timerange.latest$</latest>
+        </search>
+        <option name="charting.chart">pie</option>
+        <option name="charting.drilldown">none</option>
+        <option name="refresh.display">progressbar</option>
+        <option name="charting.seriesColors">[0x1563ff, 0x25BA81, 0xfac402, 0xc73445, 0x5c4ee5, 0x00BBFF, 0x2EB039, 0xfa8f37, 0xc62a71]</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Requests by Role Name</title>
+      <chart>
+        <search>
+          <query>`vault_audit_log` type="request" cluster=$cluster$ request.namespace.id=$namespace_id$ | stats count by auth.metadata.role_name | sort - count | head 10</query>
+          <earliest>$timerange.earliest$</earliest>
+          <latest>$timerange.latest$</latest>
+        </search>
+        <option name="charting.chart">pie</option>
+        <option name="charting.drilldown">none</option>
+        <option name="refresh.display">progressbar</option>
+        <option name="charting.seriesColors">[0x1563ff, 0x25BA81, 0xfac402, 0xc73445, 0x5c4ee5, 0x00BBFF, 0x2EB039, 0xfa8f37, 0xc62a71]</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Requests by Entity Id</title>
+      <chart>
+        <search>
+          <query>`vault_audit_log` type="request" cluster=$cluster$ request.namespace.id=$namespace_id$ | stats count by auth.entity_id | sort - count | head 10</query>
+          <earliest>$timerange.earliest$</earliest>
+          <latest>$timerange.latest$</latest>
+        </search>
+        <option name="charting.chart">pie</option>
+        <option name="charting.drilldown">none</option>
+        <option name="refresh.display">progressbar</option>
+        <option name="charting.seriesColors">[0x1563ff, 0x25BA81, 0xfac402, 0xc73445, 0x5c4ee5, 0x00BBFF, 0x2EB039, 0xfa8f37, 0xc62a71]</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Requests by IP address</title>
+      <chart>
+        <search>
+          <query>`vault_audit_log` type="request" cluster=$cluster$ request.namespace.id=$namespace_id$ | stats count by request.remote_address | sort - count | head 10</query>
+          <earliest>$timerange.earliest$</earliest>
+          <latest>$timerange.latest$</latest>
+        </search>
+        <option name="charting.chart">pie</option>
+        <option name="charting.drilldown">none</option>
+        <option name="refresh.display">progressbar</option>
+        <option name="charting.seriesColors">[0x1563ff, 0x25BA81, 0xfac402, 0xc73445, 0x5c4ee5, 0x00BBFF, 0x2EB039, 0xfa8f37, 0xc62a71]</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <html>
+        <h2>Errors</h2>
+      </html>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Errors by Type (Message)</title>
+      <chart>
+        <search>
+          <query>`vault_audit_log` type="response" error != "" cluster=$cluster$ request.namespace.id=$namespace_id$ 
+| table error request.path 
+| rex mode=sed field=error "s/.* error occurred://" 
+| rex mode=sed field=error "s/^[\n\t* ]*(.*)[\n\t ]*/\1/" 
+| rex mode=sed field=error "s/.*(lease count quota exceeded).*/\1/"
+| stats count by error</query>
+          <earliest>$timerange.earliest$</earliest>
+          <latest>$timerange.latest$</latest>
+        </search>
+        <option name="charting.chart">pie</option>
+        <option name="charting.drilldown">all</option>
+        <option name="charting.seriesColors">[0x1563ff, 0x25BA81, 0xfac402, 0xc73445, 0x5c4ee5, 0x00BBFF, 0x2EB039, 0xfa8f37, 0xc62a71]</option>
+        <option name="refresh.display">progressbar</option>
+        <drilldown>
+          <link target="_blank">/app/vault/report?s=Errors%20by%20time</link>
+        </drilldown>
+      </chart>
+    </panel>
+    <panel>
+      <title>Errors by Path</title>
+      <chart>
+        <search>
+          <query>`vault_audit_log` type="response" error != "" cluster=$cluster$ request.namespace.id=$namespace_id$ 
+| table error request.path
+| rex mode=sed field=error "s/.* error occurred://" 
+| rex mode=sed field=error "s/^[\n\t* ]*(.*)[\n\t ]*/\1/" 
+| rex mode=sed field=error "s/.*(lease count quota exceeded).*/\1/"
+| strcat request.path . ": " . error errPath 
+| stats count by errPath</query>
+          <earliest>$timerange.earliest$</earliest>
+          <latest>$timerange.latest$</latest>
+        </search>
+        <option name="charting.chart">pie</option>
+        <option name="charting.drilldown">none</option>
+        <option name="refresh.display">progressbar</option>
+        <option name="charting.seriesColors">[0x1563ff, 0x25BA81, 0xfac402, 0xc73445, 0x5c4ee5, 0x00BBFF, 0x2EB039, 0xfa8f37, 0xc62a71]</option>
+        <drilldown>
+          <link target="_blank">/app/vault/report?s=Errors%20by%20time</link>
+        </drilldown>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <html>
+        <h2>K/V Secrets</h2>
+      </html>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>K/V Backend Operations</title>
+      <chart>
+        <search>
+          <query>`vault_audit_log` response.mount_type = "kv" cluster=$cluster$ request.namespace.id=$namespace_id$ |  timechart bins=1000 count by request.operation</query>
+          <earliest>$timerange.earliest$</earliest>
+          <latest>$timerange.latest$</latest>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="charting.chart.showDataLabels">none</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.drilldown">none</option>
+        <option name="charting.layout.splitSeries">0</option>
+        <option name="charting.legend.mode">standard</option>
+        <option name="refresh.display">progressbar</option>
+        <option name="charting.seriesColors">[0x1563ff, 0x25BA81, 0xfac402, 0xc73445, 0x5c4ee5, 0x00BBFF, 0x2EB039, 0xfa8f37, 0xc62a71]</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>K/V Permission Denials by Operation</title>
+      <chart>
+        <search>
+          <query>`vault_audit_log` response.mount_type = "kv" cluster=$cluster$ request.namespace.id=$namespace_id$ | regex error = ".*permission denied" |  timechart bins=1000 count by request.operation</query>
+          <earliest>$timerange.earliest$</earliest>
+          <latest>$timerange.latest$</latest>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="charting.chart.showDataLabels">none</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.drilldown">none</option>
+        <option name="charting.layout.splitSeries">0</option>
+        <option name="charting.legend.mode">standard</option>
+        <option name="refresh.display">progressbar</option>
+        <option name="charting.seriesColors">[0x1563ff, 0x25BA81, 0xfac402, 0xc73445, 0x5c4ee5, 0x00BBFF, 0x2EB039, 0xfa8f37, 0xc62a71]</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>K/V Reads &amp; Lists By Path</title>
+      <chart>
+        <search>
+          <query>`vault_audit_log` response.mount_type="kv" (request.operation="list" OR request.operation="read") cluster=$cluster$ request.namespace.id=$namespace_id$ | timechart bins=1000 count by request.path | sort - count</query>
+          <earliest>$timerange.earliest$</earliest>
+          <latest>$timerange.latest$</latest>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="charting.chart.showDataLabels">none</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.drilldown">none</option>
+        <option name="charting.layout.splitSeries">0</option>
+        <option name="charting.legend.mode">standard</option>
+        <option name="refresh.display">progressbar</option>
+        <option name="charting.seriesColors">[0x1563ff, 0x25BA81, 0xfac402, 0xc73445, 0x5c4ee5, 0x00BBFF, 0x2EB039, 0xfa8f37, 0xc62a71]</option>
+      </chart>
+    </panel>
+  </row>
+</form>

@@ -1,0 +1,3 @@
+Unseal Key 1: <UNSEAL_KEY_1>
+
+Initial Root Token: <ROOT_TOKEN>

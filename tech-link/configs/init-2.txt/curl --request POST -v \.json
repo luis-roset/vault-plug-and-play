@@ -1,0 +1,16 @@
+curl --request POST -v \
+  --url https://api.cloud.hashicorp.com/2023-05-01/vault-radar/projects/1f9a3819-1d23-410a-91a4-a4a78706373e/api/integrations/connections \
+  --header "Content-Type: application/json" \
+  --header "Authorization: Bearer $HCP_ACCESS_TOKEN" \
+  --data '{
+    "name": "Local Vault Enterprise",
+    "integration_type": "vault_self_managed",
+    "auth_key": "env://VAULT_RADAR_VAULT_TOKEN",
+    "auth_method":"token",
+    "configuration": {
+      "vault_url": "172.18.0.5:8200",
+      "vault_token": "env://VAULT_RADAR_VAULT_TOKEN",
+      "vault_tls_ca_cert": "-----BEGIN CERTIFICATE-----\nMIIC9jCCAd6gAwIBAgIULogAQx9S5KNuh39lueXlDdaiiAcwDQYJKoZIhvcNAQEL\nBQAwFjEUMBIGA1UEAwwLY2Fsdm8wMC5jb20wHhcNMjUwMzMxMTIxMjI3WhcNMjYw\nMzMxMTIxMjI3WjAWMRQwEgYDVQQDDAtjYWx2bzAwLmNvbTCCASIwDQYJKoZIhvcN\nAQEBBQADggEPADCCAQoCggEBAJGdsRHlDtNk2ceM/5VX8RlDGZqDqCV+DanfW4wd\n/Zb/xpNl1fnaUMHnf7bTWhw1jJuL+PuEP9gf1UiczSG0wf+4hKfQo2m+BUekIkxn\nvFOn3Ans3iH8+7Z/Ue5Kx9yzff8HBGB3RcQOtYwyK0AVjZ44h7r5zDxst/qOmjKG\nlbzujsQAoIKtTdH5yBLCgXmOx/TR0dPPFLH78bYYnBznq0ScQmn1+QIz6z5IhYuW\nxnw0Lnw+Lo9+d1TcMRraVijPgKiO0pxu15KM+nZ1AK+uilUbXcfGRZ31n57osdA7\n1eL7/avyEUgFJ3nwt+zlM08U2krG5OmXoXcAeF0bVaWC01cCAwEAAaM8MDowCwYD\nVR0PBAQDAgGGMAwGA1UdEwQFMAMBAf8wHQYDVR0OBBYEFBqtuw81J+IhsrZjj3M3\nWFz3CacWMA0GCSqGSIb3DQEBCwUAA4IBAQBOi2jblL9Ay/0TxW6YwVGtKHwk4z9c\n5pzMvtV0MOH7yLV0XyPXtz5zcM9ob98UgGUxm3JlIxZxFc8wDL/WhUKrT9GAM3Rx\nMNLcl5r+O6hR2VR7j58wZiglJF+Rn57Q3INg/tzC6zIal/Vv/RIiBLGyfiNeC7NV\nlpmtDmPH9jm7s/wrfX2nFWIEn+5iV6ELOm4epGLEcUwiIDVxX9rw6Oj0xlwSuKVy\nWCGaLYHkMYVwYdcbY2Js9mOcPtPp/yFpfQrBjjyNXD4JWE8uRU+NzYop9y9DVzaX\nqldYjVBXBKQE2Xo42Auqs7VH+RUn+/iTyJ63nkdLMQM0ZZqwmRdulSPG\n-----END CERTIFICATE-----"
+    },
+    "agent_pool_id": "920c1df8-13b6-4b54-8e7d-8454693a8e14"
+  }'

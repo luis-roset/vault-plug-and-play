@@ -1,0 +1,15 @@
+# Server Configuration
+server:
+  host: "localhost"
+  port: 8000
+#Database Credentials
+database:
+{{ with secret "kv/apps/ecommerce" }}
+  host: {{ .Data.data.database }}
+  user: {{ .Data.data.user }}
+  pass: {{ .Data.data.pass }}
+{{ end }}
+# Application Configuration
+application:
+  max_users_per_host: 75
+  timeout: 15

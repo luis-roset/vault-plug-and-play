@@ -1,0 +1,13 @@
+.DS_Store
+.cursor
+.idea
+.git
+.gitignore
+.dockerignore
+Dockerfile
+
+*.log
+
+.github
+
+README.md
