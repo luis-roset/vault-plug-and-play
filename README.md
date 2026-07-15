@@ -232,27 +232,32 @@ Vault Enterprise 2.0.3 introduces **Native AI Agent Support** — a built-in mec
 #### How it works
 
 ```
-AI Agent (JWT token)
+AI Agent (JWT access token from its identity provider)
+      │
+      ▼  Authorization: Bearer <jwt>
+Vault matches JWT issuer to an OAuth Resource Server Profile
       │
       ▼
-Vault validates JWT via OAuth Resource Server Profile
+JWT signature and claims validated (audience, expiry, algorithms)
       │
       ▼
-Resolves to a Vault Identity Entity
+user_claim resolved to a Vault Identity Entity
       │
       ▼
-Vault checks Agent Registry for a matching record
+Entity checked against Agent Registry
       │
       ▼
-Authorization evaluated against baseline policies + delegation ceiling
+Authorization evaluated — baseline policies ∩ ceiling policies
+      │
+      (optional) authorization_details claim enforces path-level RAR constraints
 ```
 
 Two components power this flow:
 
 | Component | Purpose |
 |---|---|
-| **OAuth Resource Server** | Accepts JWT tokens from AI agent identity providers — no `vault login` needed |
-| **Agent Registry** | Stores and governs registered agentic identities |
+| **OAuth Resource Server** | Validates externally-issued JWTs — no `vault login` needed |
+| **Agent Registry** | Enrolls, governs, and audits registered agentic identities |
 
 All steps below target **node1** (`https://localhost:8200`). Set your environment first:
 
@@ -291,45 +296,71 @@ activated  true
 
 #### Step 2 — Create an OAuth Resource Server Profile
 
-A profile defines the trust relationship between Vault and your AI agent's identity provider.
+A profile defines how Vault validates JWTs from a specific identity provider. Create one profile per issuer.
 
-**Option A — JWKS (recommended for production)**
+**Option A — JWKS endpoint (recommended for production)**
 
-```bash
-vault write sys/config/oauth-resource-server/profiles/my-ai-platform \
-  issuer="https://my-ai-platform.example.com" \
-  jwks_url="https://my-ai-platform.example.com/.well-known/jwks.json" \
-  allowed_audiences="https://vault-node1:8200" \
-  user_claim="sub"
-```
-
-**Option B — Static PEM key (for local/dev environments)**
+Vault fetches public keys automatically from the issuer's JWKS URI.
 
 ```bash
-vault write sys/config/oauth-resource-server/profiles/my-ai-platform \
-  issuer="https://my-ai-platform.example.com" \
-  jwt_validation_pubkeys=@/path/to/public-key.pem \
-  allowed_audiences="https://vault-node1:8200" \
-  user_claim="sub"
+vault write sys/config/oauth-resource-server/my-ai-platform \
+  issuer_id="https://my-ai-platform.example.com" \
+  use_jwks=true \
+  jwks_uri="https://my-ai-platform.example.com/.well-known/jwks" \
+  audiences="https://vault-node1:8200" \
+  supported_algorithms="RS256"
 ```
 
-**Profile parameters**
+**Option B — Static public keys (for local/dev environments)**
 
-| Parameter | Description |
-|---|---|
-| `issuer` | Unique URI identifying the OAuth 2.0 issuer |
-| `jwks_url` | URL of the JWKS endpoint (JWKS mode) |
-| `jwt_validation_pubkeys` | PEM-encoded public key(s) (static mode) |
-| `allowed_audiences` | Accepted JWT `aud` claim — typically your Vault API address |
-| `user_claim` | JWT claim used to identify the agent's entity (usually `sub`) |
+Use when the issuer does not expose a JWKS endpoint. Provide one or more PEM keys as a JSON payload.
 
-**Supported signing algorithms** (asymmetric only — HMAC is not supported):
+```bash
+curl --request POST \
+  --cacert tls/ca.crt \
+  --header "X-Vault-Token: $VAULT_TOKEN" \
+  --header "Content-Type: application/json" \
+  --url "https://localhost:8200/v1/sys/config/oauth-resource-server/my-ai-platform" \
+  --data '{
+    "issuer_id": "https://my-ai-platform.example.com",
+    "use_jwks": false,
+    "public_keys": [
+      {
+        "key_id": "key-2026-01",
+        "pem": "-----BEGIN PUBLIC KEY-----\n<base64-encoded-key>\n-----END PUBLIC KEY-----"
+      }
+    ],
+    "audiences": ["https://vault-node1:8200"],
+    "supported_algorithms": ["RS256"]
+  }'
+```
 
-| Family | Algorithms |
-|---|---|
-| RSA PKCS1 | RS256, RS384, RS512 |
-| RSA PSS | PS256, PS384, PS512 |
-| ECDSA | ES256, ES384, ES512 |
+**List and read profiles**
+
+```bash
+vault list sys/config/oauth-resource-server
+vault read sys/config/oauth-resource-server/my-ai-platform
+```
+
+**Profile parameters reference**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `issuer_id` | string | required | The `iss` claim value Vault validates against. Must be unique per namespace. Vault normalizes it (trims trailing slashes, lowercases). |
+| `use_jwks` | bool | required | `true` = fetch keys from `jwks_uri`; `false` = use `public_keys` list |
+| `jwks_uri` | string | — | JWKS endpoint URL (required when `use_jwks=true`) |
+| `jwks_ca_pem` | string | — | PEM certificate to validate TLS for the JWKS endpoint |
+| `public_keys` | list | — | Array of `{key_id, pem}` objects (required when `use_jwks=false`) |
+| `audiences` | list | — | Accepted `aud` claim values. JWTs without a matching audience are rejected. |
+| `user_claim` | string | `sub` | JWT claim used to identify the agent's Vault Identity Entity |
+| `supported_algorithms` | list | all asymmetric | Signing algorithms to accept (e.g. `RS256`, `ES256`). HMAC algorithms are not supported. |
+| `jwt_type` | string | `access_token` | Expected JWT type: `access_token` or `transaction_token` |
+| `clock_skew_leeway` | integer | `0` | Seconds of leeway for `exp`, `iat`, and `nbf` claim validation |
+| `optional_authorization_details` | bool | `false` | When `false` (default), JWTs must include an `authorization_details` claim (RAR). Set to `true` to allow JWTs without it. |
+| `no_default_policy` | bool | `false` | When `true`, the `default` policy is not attached to tokens issued via this profile |
+| `enabled` | bool | `true` | Set to `false` to disable the profile without deleting it |
+
+> Switching between `use_jwks=true` and `use_jwks=false` automatically clears the fields of the previous mode.
 
 ---
 
@@ -338,7 +369,7 @@ vault write sys/config/oauth-resource-server/profiles/my-ai-platform \
 AI agents operate under two policy layers:
 
 1. **Baseline policy** — what the agent's Vault identity is allowed to do
-2. **Ceiling policy** — the maximum permissions that can ever be delegated to the agent (ceiling ⊆ baseline)
+2. **Ceiling policy** — the upper bound of permissions that can ever be delegated to the agent (ceiling ⊆ baseline)
 
 ```hcl
 # agent-baseline.hcl
@@ -406,36 +437,34 @@ ceiling_policies     [agent-ceiling default-ceiling]
 
 ---
 
-#### Step 5 — Test Agent Authentication
+#### Step 5 — Agent Authentication
 
-When an AI agent makes a request, it presents its JWT to Vault's OAuth token endpoint:
+The agent obtains a JWT from its identity provider and presents it directly to any Vault API endpoint using the standard `Authorization` header. Vault matches the `iss` claim to the configured profile, validates the JWT, and enforces the agent's policies.
 
 ```bash
-curl --request POST \
-  --cacert tls/ca.crt \
-  --url "https://localhost:8200/v1/sys/config/oauth-resource-server/token" \
-  --header "Content-Type: application/json" \
-  --data '{
-    "jwt": "<agent-jwt-token>",
-    "profile": "my-ai-platform"
-  }'
+curl --cacert tls/ca.crt \
+  --header "Authorization: Bearer <agent-jwt>" \
+  --url "https://localhost:8200/v1/secret/data/ai-agents/config"
 ```
 
-A successful response returns a Vault client token scoped to the agent's baseline policy intersected with its ceiling. The agent uses this token for subsequent Vault API calls — no prior `vault login` is needed.
+No `vault login` step is required. Vault resolves the JWT to the agent's Identity Entity, checks the Agent Registry, and applies baseline + ceiling policies for that request.
 
 ---
 
 #### Step 6 — Rich Authorization Requests (RAR)
 
-RAR allows a JWT to encode fine-grained path and capability constraints inline. Vault enforces these on top of the agent's existing policies.
+RAR embeds fine-grained path and capability constraints directly inside the JWT via an `authorization_details` claim. Vault enforces these on top of the agent's existing policies — the effective permission is the intersection of all three layers.
 
-Include an `authorization_details` claim in the JWT issued by your identity provider:
+By default, `optional_authorization_details=false` on the profile, meaning every JWT **must** include an `authorization_details` claim.
+
+**Example JWT payload with RAR**
 
 ```json
 {
   "sub": "my-ai-agent",
   "iss": "https://my-ai-platform.example.com",
   "aud": "https://vault-node1:8200",
+  "exp": 1752624000,
   "authorization_details": [
     {
       "type": "vault:path_access",
@@ -449,16 +478,20 @@ Include an `authorization_details` claim in the JWT issued by your identity prov
 }
 ```
 
-Control RAR enforcement at the profile or agent level:
+**Make RAR optional for a profile**
+
+Set `optional_authorization_details=true` to allow JWTs that omit the claim:
 
 ```bash
-# Require RAR for all tokens using this profile
-vault write sys/config/oauth-resource-server/profiles/my-ai-platform \
-  rar_required=true
+vault write sys/config/oauth-resource-server/my-ai-platform \
+  optional_authorization_details=true
+```
 
-# Override at agent level
-vault write agent-registry/agents/my-ai-agent \
-  rar_required=false
+**Disable a profile without deleting it**
+
+```bash
+vault write sys/config/oauth-resource-server/my-ai-platform \
+  enabled=false
 ```
 
 ---
@@ -483,9 +516,10 @@ Run: `vault write -f sys/activation-flags/oauth-resource-server/activate`
 
 ### JWT signature validation failure
 
-- Verify the `issuer` in the profile exactly matches the `iss` claim in the JWT
-- Confirm the JWKS endpoint is reachable from inside the Vault container
-- Ensure the JWT signing algorithm is in the supported list (no HMAC)
+- Verify `issuer_id` in the profile exactly matches the `iss` claim in the JWT (Vault normalizes both by trimming trailing slashes and lowercasing)
+- Confirm the `jwks_uri` endpoint is reachable from inside the Vault container (`podman exec vault-node1 curl <jwks_uri>`)
+- Ensure the JWT signing algorithm is listed in `supported_algorithms` — HMAC algorithms are never accepted
+- Check `clock_skew_leeway` if tokens are rejected due to timing (`exp`/`nbf` validation)
 
 ### Agent not found in registry
 
