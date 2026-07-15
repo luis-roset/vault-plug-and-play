@@ -8,6 +8,7 @@
 # Generated at deploy time — never commit credentials or private keys
 data/
 tls/
+keys/
 
 # macOS
 .DS_Store

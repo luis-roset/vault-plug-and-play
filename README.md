@@ -491,13 +491,40 @@ vault delete agent-registry/registration/display-name/my-ai-agent
 
 The agent obtains a JWT from its identity provider and presents it directly to any Vault API endpoint using the standard `Authorization` header. Vault matches the `iss` claim to the configured profile, validates the JWT, and enforces the agent's policies.
 
+No `vault login` step is required. Vault resolves the JWT to the agent's Identity Entity, checks the Agent Registry, and applies baseline + ceiling policies for that request.
+
+**Local testing — mint a JWT with the helper script**
+
+For this local environment there is no real identity provider. Use the included script to generate a signing key pair, register the public key in the Vault profile, and mint a signed RS256 JWT in one step:
+
 ```bash
-curl --cacert tls/ca.crt \
-  --header "Authorization: Bearer <agent-jwt>" \
-  --url "https://localhost:8200/v1/secret/data/ai-agents/config"
+export VAULT_ADDR="https://localhost:8200"
+export VAULT_CACERT="tls/ca.crt"
+export VAULT_TOKEN="$(jq -r '.root_token' data/vault-node1/init.json)"
+
+./scripts/mint-jwt.sh
 ```
 
-No `vault login` step is required. Vault resolves the JWT to the agent's Identity Entity, checks the Agent Registry, and applies baseline + ceiling policies for that request.
+The script will:
+1. Generate `keys/jwt-signing.key` and `keys/jwt-signing.pub` (once — reused on subsequent runs)
+2. Register the public key under the `my-ai-platform` profile using `use_jwks=false`
+3. Mint a signed JWT valid for 1 hour and print a ready-to-run `curl` command
+
+The `keys/` directory is excluded from git via `.gitignore` — the private key never leaves your machine.
+
+**Use the minted token**
+
+```bash
+JWT=$(./scripts/mint-jwt.sh | grep -A1 "JWT (expires" | tail -1)
+
+curl --cacert tls/ca.crt \
+  --header "Authorization: Bearer $JWT" \
+  --url "https://localhost:8200/v1/auth/token/lookup-self"
+```
+
+**Production**
+
+In production the agent's runtime (GitHub Actions, GCP, AWS, Azure, or a custom IdP) issues the JWT automatically — `mint-jwt.sh` is for local testing only.
 
 ---
 
