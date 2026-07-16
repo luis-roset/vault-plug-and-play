@@ -96,12 +96,13 @@ log_section "Minting JWT"
 
 NOW=$(date +%s)
 EXP=$(( NOW + TTL ))
+JTI=$(openssl rand -hex 16)   # unique token ID required by Vault (jti claim)
 
 HEADER=$(printf '{"alg":"RS256","typ":"JWT","kid":"%s"}' "${KEY_ID}" | b64url)
 
 PAYLOAD=$(printf \
-  '{"sub":"%s","iss":"%s","aud":"%s","iat":%d,"exp":%d}' \
-  "${SUBJECT}" "${ISSUER}" "${AUDIENCE}" "${NOW}" "${EXP}" \
+  '{"sub":"%s","iss":"%s","aud":"%s","iat":%d,"exp":%d,"jti":"%s"}' \
+  "${SUBJECT}" "${ISSUER}" "${AUDIENCE}" "${NOW}" "${EXP}" "${JTI}" \
   | b64url)
 
 SIG=$(printf '%s' "${HEADER}.${PAYLOAD}" \
@@ -111,19 +112,56 @@ SIG=$(printf '%s' "${HEADER}.${PAYLOAD}" \
 JWT="${HEADER}.${PAYLOAD}.${SIG}"
 
 # =============================================================================
+# STEP 4 — Exchange JWT for a Vault token via the JWT auth method
+# =============================================================================
+log_section "Exchanging JWT for Vault Token"
+
+LOGIN_RESPONSE=$(curl --silent --show-error \
+  --cacert "${VAULT_CACERT}" \
+  --request POST \
+  --header "Content-Type: application/json" \
+  --url "${VAULT_ADDR}/v1/auth/jwt/login" \
+  --data "{\"role\": \"ai-agent-role\", \"jwt\": \"${JWT}\"}")
+
+AGENT_TOKEN=$(printf '%s' "${LOGIN_RESPONSE}" | jq -r '.auth.client_token // empty')
+
+if [[ -z "${AGENT_TOKEN}" ]]; then
+  log_info "JWT auth login failed (is auth/jwt enabled with role 'ai-agent-role'?)."
+  log_info "Errors: $(printf '%s' "${LOGIN_RESPONSE}" | jq -r '.errors[]? // "unknown"')"
+  log_info "Falling back to raw JWT output."
+  AGENT_TOKEN=""
+fi
+
+# =============================================================================
 # Output
 # =============================================================================
 log_section "Result"
 echo
-echo -e "${YELLOW}JWT (expires in ${TTL}s):${NC}"
-echo "${JWT}"
-echo
-echo -e "${YELLOW}Test with curl:${NC}"
-echo "curl --cacert ${VAULT_CACERT} \\"
-echo "  --header \"Authorization: Bearer ${JWT}\" \\"
-echo "  --url \"${VAULT_ADDR}/v1/auth/token/lookup-self\""
-echo
-echo -e "${YELLOW}Or export and use the Vault CLI:${NC}"
-echo "export VAULT_TOKEN_FOR_AGENT=\"${JWT}\""
-echo "curl --cacert ${VAULT_CACERT} -H \"Authorization: Bearer \$VAULT_TOKEN_FOR_AGENT\" ${VAULT_ADDR}/v1/sys/health"
+
+if [[ -n "${AGENT_TOKEN}" ]]; then
+  POLICIES=$(printf '%s' "${LOGIN_RESPONSE}" | jq -r '.auth.policies | join(", ")')
+  ENTITY_ID=$(printf '%s' "${LOGIN_RESPONSE}" | jq -r '.auth.entity_id')
+  echo -e "${GREEN}Vault Token (from JWT auth login):${NC}"
+  echo "${AGENT_TOKEN}"
+  echo
+  echo -e "${YELLOW}Policies: ${POLICIES}${NC}"
+  echo -e "${YELLOW}Entity:   ${ENTITY_ID}${NC}"
+  echo
+  echo -e "${YELLOW}Test with curl:${NC}"
+  echo "curl --cacert ${VAULT_CACERT} \\"
+  echo "  --header \"X-Vault-Token: ${AGENT_TOKEN}\" \\"
+  echo "  --url \"${VAULT_ADDR}/v1/secret/data/ai-agents/test\""
+  echo
+  echo -e "${YELLOW}Or export and use the Vault CLI:${NC}"
+  echo "export VAULT_TOKEN=\"${AGENT_TOKEN}\""
+  echo "vault kv get secret/ai-agents/test"
+else
+  echo -e "${YELLOW}JWT (expires in ${TTL}s):${NC}"
+  echo "${JWT}"
+  echo
+  echo -e "${YELLOW}Test with curl (OAuth RS Bearer):${NC}"
+  echo "curl --cacert ${VAULT_CACERT} \\"
+  echo "  --header \"Authorization: Bearer ${JWT}\" \\"
+  echo "  --url \"${VAULT_ADDR}/v1/secret/data/ai-agents/test\""
+fi
 echo

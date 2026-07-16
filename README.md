@@ -49,6 +49,7 @@ vault-plug-and-play/
 ├── scripts/
 │   ├── gen-certs.sh        # CA + per-node TLS certificate generation
 │   ├── init-vault.sh       # Vault init + unseal automation
+│   ├── mint-jwt.sh        # Mint a signed JWT and exchange it for a Vault token
 │   └── setup-replication.sh# Performance Replication setup (2-node only)
 ├── tls/                    # Generated at deploy time — do not commit
 └── data/                   # Raft data + init.json credentials — do not commit
@@ -234,29 +235,30 @@ Vault Enterprise 2.0.3 introduces **Native AI Agent Support** — a built-in mec
 ```
 AI Agent (JWT access token from its identity provider)
       │
-      ▼  Authorization: Bearer <jwt>
-Vault matches JWT issuer to an OAuth Resource Server Profile
+      ▼  POST /v1/auth/jwt/login  { "role": "ai-agent-role", "jwt": "<jwt>" }
+Vault validates JWT signature and claims (audience, expiry, algorithms)
       │
       ▼
-JWT signature and claims validated (audience, expiry, algorithms)
-      │
-      ▼
-user_claim resolved to a Vault Identity Entity
+user_claim (sub) resolved to a Vault Identity Entity via entity alias
       │
       ▼
 Entity checked against Agent Registry
       │
       ▼
-Authorization evaluated — baseline policies ∩ ceiling policies
+Vault token returned — scoped to baseline policies ∩ ceiling policies
+      │
+      ▼
+Agent uses Vault token to access secrets
       │
       (optional) authorization_details claim enforces path-level RAR constraints
 ```
 
-Two components power this flow:
+Three components power this flow:
 
 | Component | Purpose |
 |---|---|
-| **OAuth Resource Server** | Validates externally-issued JWTs — no `vault login` needed |
+| **JWT Auth Method** | Validates externally-issued JWTs and exchanges them for Vault tokens |
+| **OAuth Resource Server** | Defines per-issuer profiles with signing keys, audiences, and algorithms |
 | **Agent Registry** | Enrolls, governs, and audits registered agentic identities |
 
 All steps below target **node1** (`https://localhost:8200`). Set your environment first:
@@ -406,6 +408,41 @@ vault write identity/entity \
 
 Save the `id` value from the response — it is required to register the agent in the next step.
 
+**Enable the JWT auth method and create an entity alias**
+
+The JWT auth method provides the authentication backend that maps JWT claims to Vault Identity Entities. Enable it, configure it with the same signing key used by your identity provider, create a role, and bind the entity to the JWT `sub` claim via an alias:
+
+```bash
+# Enable the JWT auth method
+vault auth enable jwt
+
+# Configure with the same public key (or JWKS URI) from Step 2
+vault write auth/jwt/config \
+  jwt_validation_pubkeys="$(cat keys/jwt-signing.pub)" \
+  jwt_supported_algs="RS256"
+
+# Create a role matching your OAuth profile settings
+vault write auth/jwt/role/ai-agent-role \
+  role_type="jwt" \
+  bound_audiences="https://localhost:8200" \
+  user_claim="sub" \
+  bound_subject="my-ai-agent" \
+  token_policies="agent-baseline" \
+  token_ttl="1h" \
+  clock_skew_leeway="300"
+
+# Get the JWT auth mount accessor
+JWT_ACCESSOR=$(vault auth list -format=json | jq -r '."jwt/".accessor')
+
+# Create an entity alias linking the JWT sub claim to the entity
+vault write identity/entity-alias \
+  name="my-ai-agent" \
+  canonical_id="<entity-id-from-previous-step>" \
+  mount_accessor="$JWT_ACCESSOR"
+```
+
+> **Why is this needed?** Vault resolves JWT claims to Identity Entities through aliases. The alias binds the JWT `sub` value (`my-ai-agent`) to the entity via the JWT auth mount accessor.
+
 ---
 
 #### Step 4 — Register the AI Agent
@@ -489,13 +526,11 @@ vault delete agent-registry/registration/display-name/my-ai-agent
 
 #### Step 5 — Agent Authentication
 
-The agent obtains a JWT from its identity provider and presents it directly to any Vault API endpoint using the standard `Authorization` header. Vault matches the `iss` claim to the configured profile, validates the JWT, and enforces the agent's policies.
-
-No `vault login` step is required. Vault resolves the JWT to the agent's Identity Entity, checks the Agent Registry, and applies baseline + ceiling policies for that request.
+The agent obtains a JWT from its identity provider and exchanges it for a Vault token via the JWT auth method. Vault validates the JWT, resolves the agent's Identity Entity through the alias created in Step 3, checks the Agent Registry, and returns a token scoped to the agent's baseline + ceiling policies.
 
 **Local testing — mint a JWT with the helper script**
 
-For this local environment there is no real identity provider. Use the included script to generate a signing key pair, register the public key in the Vault profile, and mint a signed RS256 JWT in one step:
+For this local environment there is no real identity provider. Use the included script to generate a signing key pair, register the public key in the Vault profile, mint a signed RS256 JWT, and exchange it for a Vault token in one step:
 
 ```bash
 export VAULT_ADDR="https://localhost:8200"
@@ -508,23 +543,35 @@ export VAULT_TOKEN="$(jq -r '.root_token' data/vault-node1/init.json)"
 The script will:
 1. Generate `keys/jwt-signing.key` and `keys/jwt-signing.pub` (once — reused on subsequent runs)
 2. Register the public key under the `my-ai-platform` profile using `use_jwks=false`
-3. Mint a signed JWT valid for 1 hour and print a ready-to-run `curl` command
+3. Mint a signed JWT valid for 1 hour
+4. Exchange the JWT for a Vault token via `POST /v1/auth/jwt/login`
+5. Print the Vault token and a ready-to-run `curl` command
 
 The `keys/` directory is excluded from git via `.gitignore` — the private key never leaves your machine.
 
 **Use the minted token**
 
 ```bash
-JWT=$(./scripts/mint-jwt.sh | grep -A1 "JWT (expires" | tail -1)
+# Run the script — it prints the Vault token directly
+./scripts/mint-jwt.sh
 
+# Or capture the token programmatically
+AGENT_TOKEN=$(curl --silent --cacert tls/ca.crt \
+  --request POST \
+  --header "Content-Type: application/json" \
+  --url "https://localhost:8200/v1/auth/jwt/login" \
+  --data "{\"role\": \"ai-agent-role\", \"jwt\": \"$(./scripts/mint-jwt.sh 2>/dev/null | grep -A1 'JWT (expires' | tail -1)\"}" \
+  | jq -r '.auth.client_token')
+
+# Read a secret
 curl --cacert tls/ca.crt \
-  --header "Authorization: Bearer $JWT" \
-  --url "https://localhost:8200/v1/auth/token/lookup-self"
+  --header "X-Vault-Token: $AGENT_TOKEN" \
+  --url "https://localhost:8200/v1/secret/data/ai-agents/test"
 ```
 
 **Production**
 
-In production the agent's runtime (GitHub Actions, GCP, AWS, Azure, or a custom IdP) issues the JWT automatically — `mint-jwt.sh` is for local testing only.
+In production the agent's runtime (GitHub Actions, GCP, AWS, Azure, or a custom IdP) issues the JWT automatically — `mint-jwt.sh` is for local testing only. The agent exchanges the JWT for a Vault token by calling `POST /v1/auth/jwt/login` with the JWT and role name.
 
 ---
 
@@ -597,6 +644,33 @@ Run: `vault write -f sys/activation-flags/oauth-resource-server/activate`
 - Confirm the `jwks_uri` endpoint is reachable from inside the Vault container (`podman exec vault-node1 curl <jwks_uri>`)
 - Ensure the JWT signing algorithm is listed in `supported_algorithms` — HMAC algorithms are never accepted
 - Check `clock_skew_leeway` if tokens are rejected due to timing (`exp`/`nbf` validation)
+
+### JWT entity resolution failure — "no alias found"
+
+```
+2 errors occurred:
+  * no alias found
+  * error looking up entity
+```
+
+Vault cannot map the JWT `sub` claim to an Identity Entity. This means the entity alias is missing or bound to the wrong mount accessor.
+
+1. Confirm the JWT auth method is enabled: `vault auth list`
+2. Get the JWT mount accessor: `vault auth list -format=json | jq -r '."jwt/".accessor'`
+3. Check the entity has an alias under that accessor: `vault read identity/entity/name/my-ai-agent`
+4. If the `aliases` list is empty or uses a different accessor, create the alias:
+
+```bash
+JWT_ACCESSOR=$(vault auth list -format=json | jq -r '."jwt/".accessor')
+ENTITY_ID=$(vault read -field=id identity/entity/name/my-ai-agent)
+
+vault write identity/entity-alias \
+  name="my-ai-agent" \
+  canonical_id="$ENTITY_ID" \
+  mount_accessor="$JWT_ACCESSOR"
+```
+
+The alias `name` must exactly match the JWT `sub` claim value.
 
 ### Agent not found in registry
 
